@@ -18,14 +18,377 @@
 package daemon
 
 import (
+	"archive/tar"
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/docker/docker/container"
+	"github.com/docker/docker/pkg/rootless"
 
 	swarmtypes "github.com/docker/docker/api/types/swarm"
+	"github.com/moby/go-archive"
+	swarmexec "github.com/moby/swarmkit/v2/agent/exec"
+	swarmapi "github.com/moby/swarmkit/v2/api"
+	"github.com/moby/sys/user"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/sirupsen/logrus"
 )
+
+const suseSecretsTogglePath = "/etc/docker/suse-secrets-enable"
+
+// parseEnableFile parses a file that can only contain "0" or "1" (with some
+// whitespace).
+func parseEnableFile(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	data = bytes.TrimSpace(data)
+
+	switch value := string(data); value {
+	case "1":
+		return true, nil
+	case "0", "":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid value %q (must be 0 to disable or 1 to enable)", value)
+	}
+}
+
+func isSuseSecretsEnabled() bool {
+	value, err := parseEnableFile(suseSecretsTogglePath)
+	if err != nil {
+		logrus.Warnf("SUSE:secrets :: error parsing %s: %v -- disabling SUSE secrets", suseSecretsTogglePath, err)
+		value = false
+	}
+	return value
+}
+
+var suseSecretsEnabled = true
+
+func init() {
+	// Make this entire feature toggle-able so that users can disable it if
+	// they run into issues like bsc#1231348.
+	suseSecretsEnabled = isSuseSecretsEnabled()
+	if suseSecretsEnabled {
+		logrus.Infof("SUSE:secrets :: SUSEConnect support enabled (set %s to 0 to disable)", suseSecretsTogglePath)
+	} else {
+		logrus.Infof("SUSE:secrets :: SUSEConnect support disabled by %s", suseSecretsTogglePath)
+	}
+}
+
+// Creating a fake file.
+type SuseFakeFile struct {
+	Path string
+	Uid  int
+	Gid  int
+	Mode os.FileMode
+	Data []byte
+}
+
+func (s SuseFakeFile) id() string {
+	// NOTE: It is _very_ important that this string always has a prefix of
+	//       "suse". This is how we can ensure that we can operate on
+	//       SecretReferences with a confidence that it was made by us.
+	return fmt.Sprintf("suse_%s_%s", digest.FromBytes(s.Data).Hex(), s.Path)
+}
+
+func (s SuseFakeFile) toSecret() *swarmapi.Secret {
+	return &swarmapi.Secret{
+		ID:       s.id(),
+		Internal: true,
+		Spec: swarmapi.SecretSpec{
+			Data: s.Data,
+		},
+	}
+}
+
+func (s SuseFakeFile) toSecretReference(idMaps user.IdentityMapping) *swarmtypes.SecretReference {
+	// Figure out the host-facing {uid,gid} based on the provided maps. Fall
+	// back to root if the UID/GID don't match (we are guaranteed that root is
+	// mapped).
+	hostUID, hostGID := idMaps.RootPair()
+	if uid, gid, err := idMaps.ToHost(s.Uid, s.Gid); err == nil {
+		hostUID, hostGID = uid, gid
+	}
+
+	// Return the secret reference as a file target.
+	return &swarmtypes.SecretReference{
+		SecretID:   s.id(),
+		SecretName: s.id(),
+		File: &swarmtypes.SecretReferenceFileTarget{
+			Name: s.Path,
+			UID:  fmt.Sprintf("%d", hostUID),
+			GID:  fmt.Sprintf("%d", hostGID),
+			Mode: s.Mode,
+		},
+	}
+}
+
+// readDir will recurse into a directory prefix/dir, and return the set of
+// secrets in that directory (as a tar archive that is packed inside the "data"
+// field). The Path attribute of each has the prefix stripped. Symlinks are
+// dereferenced.
+func readDir(prefix, dir string) ([]*SuseFakeFile, error) {
+	var suseFiles []*SuseFakeFile
+
+	path := filepath.Join(prefix, dir)
+	fi, err := os.Stat(path)
+	if err != nil {
+		// Ignore missing files.
+		if os.IsNotExist(err) {
+			// If the path itself exists it was a dangling symlink so give a
+			// warning about the symlink dangling.
+			_, err2 := os.Lstat(path)
+			if !os.IsNotExist(err2) {
+				logrus.Warnf("SUSE:secrets :: ignoring dangling symlink: %s", path)
+			}
+			return nil, nil
+		}
+		return nil, err
+	} else if !fi.IsDir() {
+		// Just to be safe.
+		logrus.Infof("SUSE:secrets :: expected %q to be a directory, but was a file", path)
+		return readFile(prefix, dir)
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Construct a tar archive of the source directory. We tar up the prefix
+	// directory and add dir as an IncludeFiles specifically so that we
+	// preserve the name of the directory itself.
+	tarStream, err := archive.TarWithOptions(path, &archive.TarOptions{
+		Compression:      archive.Uncompressed,
+		IncludeSourceDir: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("SUSE:secrets :: failed to tar source directory %q: %w", path, err)
+	}
+	tarStreamBytes, err := ioutil.ReadAll(tarStream)
+	if err != nil {
+		return nil, fmt.Errorf("SUSE:secrets :: failed to read full tar archive: %w", err)
+	}
+
+	// Get a list of the symlinks in the tar archive.
+	var symlinks []string
+	tmpTr := tar.NewReader(bytes.NewBuffer(tarStreamBytes))
+	for {
+		hdr, err := tmpTr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("SUSE:secrets :: failed to read through tar reader: %w", err)
+		}
+		if hdr.Typeflag == tar.TypeSymlink {
+			symlinks = append(symlinks, hdr.Name)
+		}
+	}
+
+	// Symlinks aren't dereferenced in the above archive, so we explicitly do a
+	// rewrite of the tar archive to include all symlinks to files. We cannot
+	// do directories here, but lower-level directory symlinks aren't supported
+	// by zypper so this isn't an issue.
+	symlinkModifyMap := map[string]archive.TarModifierFunc{}
+	for _, sym := range symlinks {
+		logrus.Debugf("SUSE:secrets: archive(%q) %q is a need-to-rewrite symlink", path, sym)
+		symlinkModifyMap[sym] = func(tarPath string, hdr *tar.Header, r io.Reader) (*tar.Header, []byte, error) {
+			logrus.Debugf("SUSE:secrets: archive(%q) mapping for symlink %q", path, tarPath)
+			tarFullPath := filepath.Join(path, tarPath)
+
+			// Get a copy of the original byte stream.
+			oldContent, err := ioutil.ReadAll(r)
+			if err != nil {
+				return nil, nil, fmt.Errorf("suse_rewrite: failed to read archive entry %q: %w", tarPath, err)
+			}
+
+			// Check that the file actually exists.
+			fi, err := os.Stat(tarFullPath)
+			if err != nil {
+				logrus.Warnf("suse_rewrite: failed to stat archive entry %q: %v", tarFullPath, err)
+				return hdr, oldContent, nil
+			}
+
+			// Read the actual contents.
+			content, err := ioutil.ReadFile(tarFullPath)
+			if err != nil {
+				logrus.Warnf("suse_rewrite: failed to read %q: %v", tarFullPath, err)
+				return hdr, oldContent, nil
+			}
+
+			newHdr, err := tar.FileInfoHeader(fi, "")
+			if err != nil {
+				// Fake the header.
+				newHdr = &tar.Header{
+					Typeflag: tar.TypeReg,
+					Mode:     0644,
+				}
+			}
+
+			// Update the key fields.
+			hdr.Typeflag = newHdr.Typeflag
+			hdr.Mode = newHdr.Mode
+			hdr.Linkname = ""
+			return hdr, content, nil
+		}
+	}
+
+	// Create the rewritten tar stream.
+	tarStream = archive.ReplaceFileTarWrapper(ioutil.NopCloser(bytes.NewBuffer(tarStreamBytes)), symlinkModifyMap)
+	tarStreamBytes, err = ioutil.ReadAll(tarStream)
+	if err != nil {
+		return nil, fmt.Errorf("SUSE:secrets :: failed to read rewritten archive: %w", err)
+	}
+
+	// Add the tar stream as a "file".
+	suseFiles = append(suseFiles, &SuseFakeFile{
+		Path: dir,
+		Mode: fi.Mode(),
+		Data: tarStreamBytes,
+	})
+	return suseFiles, nil
+}
+
+// readFile returns a secret given a file under a given prefix.
+func readFile(prefix, file string) ([]*SuseFakeFile, error) {
+	path := filepath.Join(prefix, file)
+	fi, err := os.Stat(path)
+	if err != nil {
+		// Ignore missing files.
+		if os.IsNotExist(err) {
+			// If the path itself exists it was a dangling symlink so give a
+			// warning about the symlink dangling.
+			_, err2 := os.Lstat(path)
+			if !os.IsNotExist(err2) {
+				logrus.Warnf("SUSE:secrets :: ignoring dangling symlink: %s", path)
+			}
+			return nil, nil
+		}
+		return nil, err
+	} else if fi.IsDir() {
+		// Just to be safe.
+		logrus.Infof("SUSE:secrets :: expected %q to be a file, but was a directory", path)
+		return readDir(prefix, file)
+	}
+
+	var uid, gid int
+	if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
+		uid, gid = int(stat.Uid), int(stat.Gid)
+	} else {
+		logrus.Warnf("SUSE:secrets :: failed to cast file stat_t: defaulting to owned by root:root: %s", path)
+		uid, gid = 0, 0
+	}
+
+	bytes, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var suseFiles []*SuseFakeFile
+	suseFiles = append(suseFiles, &SuseFakeFile{
+		Path: file,
+		Uid:  uid,
+		Gid:  gid,
+		Mode: fi.Mode(),
+		Data: bytes,
+	})
+	return suseFiles, nil
+}
+
+// getHostSuseSecretData returns the list of SuseFakeFiles the need to be added
+// as SUSE secrets.
+func getHostSuseSecretData() ([]*SuseFakeFile, error) {
+	secrets := []*SuseFakeFile{}
+
+	credentials, err := readDir("/etc/zypp", "credentials.d")
+	if err != nil {
+		if os.IsNotExist(err) {
+			credentials = []*SuseFakeFile{}
+		} else {
+			logrus.Errorf("SUSE:secrets :: error while reading zypp credentials: %s", err)
+			return nil, err
+		}
+	}
+	secrets = append(secrets, credentials...)
+
+	suseConnect, err := readFile("/etc", "SUSEConnect")
+	if err != nil {
+		if os.IsNotExist(err) {
+			suseConnect = []*SuseFakeFile{}
+		} else {
+			logrus.Errorf("SUSE:secrets :: error while reading /etc/SUSEConnect: %s", err)
+			return nil, err
+		}
+	}
+	secrets = append(secrets, suseConnect...)
+
+	return secrets, nil
+}
+
+// To fake an empty store, in the case where we are operating on a container
+// that was created pre-swarmkit. Otherwise segfaults and other fun things
+// happen. See bsc#1057743.
+type (
+	suseEmptyStore  struct{}
+	suseEmptySecret struct{}
+	suseEmptyConfig struct{}
+	suseEmptyVolume struct{}
+)
+
+// In order to reduce the amount of code touched outside of this file, we
+// implement the swarm API for DependencyGetter. This asserts that this
+// requirement will always be matched. In addition, for the case of the *empty*
+// getters this reduces memory usage by having a global instance.
+var (
+	_           swarmexec.DependencyGetter = &suseDependencyStore{}
+	emptyStore  swarmexec.DependencyGetter = suseEmptyStore{}
+	emptySecret swarmexec.SecretGetter     = suseEmptySecret{}
+	emptyConfig swarmexec.ConfigGetter     = suseEmptyConfig{}
+	emptyVolume swarmexec.VolumeGetter     = suseEmptyVolume{}
+)
+
+var errSuseEmptyStore = fmt.Errorf("SUSE:secrets :: tried to get a resource from empty store [this is a bug]")
+
+func (_ suseEmptyConfig) Get(_ string) (*swarmapi.Config, error) { return nil, errSuseEmptyStore }
+func (_ suseEmptySecret) Get(_ string) (*swarmapi.Secret, error) { return nil, errSuseEmptyStore }
+func (_ suseEmptyVolume) Get(_ string) (string, error)           { return "", errSuseEmptyStore }
+func (_ suseEmptyStore) Secrets() swarmexec.SecretGetter         { return emptySecret }
+func (_ suseEmptyStore) Configs() swarmexec.ConfigGetter         { return emptyConfig }
+func (_ suseEmptyStore) Volumes() swarmexec.VolumeGetter         { return emptyVolume }
+
+type suseDependencyStore struct {
+	dfl     swarmexec.DependencyGetter
+	secrets map[string]*swarmapi.Secret
+}
+
+// The following are effectively dumb wrappers that return ourselves, or the
+// default.
+func (s *suseDependencyStore) Secrets() swarmexec.SecretGetter { return s }
+func (s *suseDependencyStore) Volumes() swarmexec.VolumeGetter { return emptyVolume }
+func (s *suseDependencyStore) Configs() swarmexec.ConfigGetter { return s.dfl.Configs() }
+
+// Get overrides the underlying DependencyGetter with our own secrets (falling
+// through to the underlying DependencyGetter if the secret isn't present).
+func (s *suseDependencyStore) Get(id string) (*swarmapi.Secret, error) {
+	logrus.Debugf("SUSE:secrets :: id=%s requested from suseDependencyGetter", id)
+
+	secret, ok := s.secrets[id]
+	if !ok {
+		// fallthrough
+		return s.dfl.Secrets().Get(id)
+	}
+	return secret, nil
+}
 
 // clearSuseSecrets removes any SecretReferences which were added by us
 // explicitly (this is detected by checking that the prefix has a 'suse_'
@@ -41,4 +404,79 @@ func (daemon *Daemon) clearSuseSecrets(c *container.Container) {
 		without = append(without, secret)
 	}
 	c.SecretReferences = without
+}
+
+func (daemon *Daemon) isRootless() bool {
+	cfg := daemon.Config()
+	return os.Geteuid() != 0 || Rootless(&cfg) || rootless.RunningWithRootlessKit()
+}
+
+func (daemon *Daemon) injectSuseSecretStore(c *container.Container) error {
+	// We drop any "old" SUSE secrets, as it appears that old containers (when
+	// restarted) could still have references to old secrets. The .id() of all
+	// secrets have a prefix of "suse" so this is much easier. See bsc#1057743
+	// for details on why this could cause issues.
+	daemon.clearSuseSecrets(c)
+
+	// Don't inject anything if the administrator has disabled suse secrets.
+	// However, for previous existing containers we need to remove old secrets
+	// (see above), otherwise they will still have old secret data.
+	if !suseSecretsEnabled {
+		logrus.Debugf("SUSE:secrets :: skipping injection of secrets into container %q because of %s", c.ID, suseSecretsTogglePath)
+		return nil
+	}
+	// Unprivileged users (or Docker in rootless mode, in a user namespace)
+	// cannot access host zypper credentials so there is no real point even
+	// trying to inject them into the container. bsc#1240150
+	if daemon.isRootless() {
+		logrus.Debugf("SUSE:secrets :: skipping injection of secrets into container in rootless mode")
+		return nil
+	}
+
+	newDependencyStore := &suseDependencyStore{
+		dfl:     c.DependencyStore,
+		secrets: make(map[string]*swarmapi.Secret),
+	}
+	// Handle old containers. See bsc#1057743.
+	if newDependencyStore.dfl == nil {
+		newDependencyStore.dfl = emptyStore
+	}
+
+	secrets, err := getHostSuseSecretData()
+	if errors.Is(err, os.ErrPermission) {
+		// This should only ever really happen for rootless Docker (which we
+		// already handled above), but ignore permission errors here just in
+		// case. bsc#1240150
+		logrus.Debugf("SUSE:secrets :: skipping injection of secrets into container because of permission error while loading host data")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	idMaps := daemon.idMapping
+	for _, secret := range secrets {
+		newDependencyStore.secrets[secret.id()] = secret.toSecret()
+		c.SecretReferences = append(c.SecretReferences, secret.toSecretReference(idMaps))
+	}
+
+	c.DependencyStore = newDependencyStore
+
+	// bsc#1057743 -- In older versions of Docker we added volumes explicitly
+	// to the mount list. This causes clashes because of duplicate namespaces.
+	// If we see an existing mount that will clash with the in-built secrets
+	// mount we assume it's our fault.
+	intendedMounts, err := c.SecretMounts()
+	if err != nil {
+		logrus.Warnf("SUSE:secrets :: fetching old secret mounts: %v", err)
+		return err
+	}
+	for _, intendedMount := range intendedMounts {
+		mountPath := intendedMount.Destination
+		if volume, ok := c.MountPoints[mountPath]; ok {
+			logrus.Debugf("SUSE:secrets :: removing pre-existing %q mount: %#v", mountPath, volume)
+			delete(c.MountPoints, mountPath)
+		}
+	}
+	return nil
 }
