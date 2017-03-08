@@ -4,7 +4,9 @@
 package daemon // import "github.com/docker/docker/daemon"
 
 import (
+	"bytes"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +14,7 @@ import (
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/links"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/pkg/system"
@@ -205,9 +208,6 @@ func (daemon *Daemon) setupSecretDir(c *container.Container) (setupErr error) {
 		if err != nil {
 			return errors.Wrap(err, "unable to get secret from secret store")
 		}
-		if err := os.WriteFile(fPath, secret.Spec.Data, s.File.Mode); err != nil {
-			return errors.Wrap(err, "error injecting secret")
-		}
 
 		uid, err := strconv.Atoi(s.File.UID)
 		if err != nil {
@@ -218,6 +218,25 @@ func (daemon *Daemon) setupSecretDir(c *container.Container) (setupErr error) {
 			return err
 		}
 
+		if s.File.Mode.IsDir() {
+			if err := os.Mkdir(fPath, s.File.Mode); err != nil {
+				return errors.Wrap(err, "error creating secretdir")
+			}
+			if secret.Spec.Data != nil {
+				// If the "file" is a directory, then s.File.Data is actually a tar
+				// archive of the directory. So we just do a tar extraction here.
+				if err := archive.UntarUncompressed(bytes.NewBuffer(secret.Spec.Data), fPath, &archive.TarOptions{
+					UIDMaps: daemon.idMapping.UIDs(),
+					GIDMaps: daemon.idMapping.GIDs(),
+				}); err != nil {
+					return errors.Wrap(err, "error injecting secretdir")
+				}
+			}
+		} else {
+			if err := ioutil.WriteFile(fPath, secret.Spec.Data, s.File.Mode); err != nil {
+				return errors.Wrap(err, "error injecting secret")
+			}
+		}
 		if err := os.Chown(fPath, rootIDs.UID+uid, rootIDs.GID+gid); err != nil {
 			return errors.Wrap(err, "error setting ownership for secret")
 		}
