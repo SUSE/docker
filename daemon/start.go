@@ -151,6 +151,11 @@ func (daemon *Daemon) containerStart(ctx context.Context, container *container.C
 		return err
 	}
 
+	// SUSE:secrets -- inject the SUSE secret store
+	if err := daemon.injectSuseSecretStore(container); err != nil {
+		return errdefs.System(err)
+	}
+
 	spec, err := daemon.createSpec(ctx, container)
 	if err != nil {
 		return errdefs.System(err)
