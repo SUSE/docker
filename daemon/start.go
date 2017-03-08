@@ -123,6 +123,11 @@ func (daemon *Daemon) containerStart(ctx context.Context, daemonCfg *configStore
 		return err
 	}
 
+	// SUSE:secrets -- inject the SUSE secret store
+	if err := daemon.injectSuseSecretStore(container); err != nil {
+		return err
+	}
+
 	m, cleanup, err := daemon.setupMounts(ctx, container)
 	if err != nil {
 		return err
