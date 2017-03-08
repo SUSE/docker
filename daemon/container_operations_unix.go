@@ -3,6 +3,7 @@
 package daemon // import "github.com/docker/docker/daemon"
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/docker/docker/libnetwork/drivers/bridge"
 	"github.com/docker/docker/pkg/process"
 	"github.com/docker/docker/pkg/stringid"
+	"github.com/moby/go-archive"
 	"github.com/moby/sys/mount"
 	"github.com/moby/sys/user"
 	"github.com/opencontainers/selinux/go-selinux/label"
@@ -325,9 +327,6 @@ func (daemon *Daemon) setupSecretDir(ctr *container.Container) (setupErr error) 
 		if err != nil {
 			return errors.Wrap(err, "unable to get secret from secret store")
 		}
-		if err := os.WriteFile(fPath, secret.Spec.Data, s.File.Mode); err != nil {
-			return errors.Wrap(err, "error injecting secret")
-		}
 
 		uid, err := strconv.Atoi(s.File.UID)
 		if err != nil {
@@ -338,6 +337,24 @@ func (daemon *Daemon) setupSecretDir(ctr *container.Container) (setupErr error) 
 			return err
 		}
 
+		if s.File.Mode.IsDir() {
+			if err := os.Mkdir(fPath, s.File.Mode); err != nil {
+				return errors.Wrap(err, "error creating secretdir")
+			}
+			if secret.Spec.Data != nil {
+				// If the "file" is a directory, then s.File.Data is actually a tar
+				// archive of the directory. So we just do a tar extraction here.
+				if err := archive.UntarUncompressed(bytes.NewBuffer(secret.Spec.Data), fPath, &archive.TarOptions{
+					IDMap: daemon.idMapping,
+				}); err != nil {
+					return errors.Wrap(err, "error injecting secretdir")
+				}
+			}
+		} else {
+			if err := os.WriteFile(fPath, secret.Spec.Data, s.File.Mode); err != nil {
+				return errors.Wrap(err, "error injecting secret")
+			}
+		}
 		if err := os.Chown(fPath, ruid+uid, rgid+gid); err != nil {
 			return errors.Wrap(err, "error setting ownership for secret")
 		}
