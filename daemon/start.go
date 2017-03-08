@@ -161,6 +161,11 @@ func (daemon *Daemon) containerStart(ctx context.Context, container *container.C
 	// SUSEConnect patch enabled (bsc#1244035).
 	daemon.clearSuseSecrets(container)
 
+	// SUSE:secrets -- inject the SUSE secret store
+	if err := daemon.injectSuseSecretStore(container); err != nil {
+		return errdefs.System(err)
+	}
+
 	spec, err := daemon.createSpec(ctx, container)
 	if err != nil {
 		return errdefs.System(err)
