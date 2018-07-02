@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/docker/distribution/reference"
+	dref "github.com/docker/distribution/reference"
 	"github.com/docker/distribution/registry/client/auth"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/registry"
@@ -19,13 +19,14 @@ import (
 // Service is the interface defining what a registry service should implement.
 type Service interface {
 	Auth(ctx context.Context, authConfig *types.AuthConfig, userAgent string) (status, token string, err error)
-	LookupPullEndpoints(hostname string) (endpoints []APIEndpoint, err error)
-	LookupPushEndpoints(hostname string) (endpoints []APIEndpoint, err error)
-	ResolveRepository(name reference.Named) (*RepositoryInfo, error)
+	LookupPullEndpoints(reference string) (endpoints []APIEndpoint, err error)
+	LookupPushEndpoints(reference string) (endpoints []APIEndpoint, err error)
+	ResolveRepository(name dref.Named) (*RepositoryInfo, error)
 	Search(ctx context.Context, term string, limit int, authConfig *types.AuthConfig, userAgent string, headers map[string][]string) (*registry.SearchResults, error)
 	ServiceConfig() *registry.ServiceConfig
 	LoadAllowNondistributableArtifacts([]string) error
 	LoadMirrors([]string) error
+	LoadRegistries([]registry.Registry) error
 	LoadInsecureRegistries([]string) error
 }
 
@@ -46,8 +47,9 @@ func NewService(options ServiceOptions) (Service, error) {
 
 // ServiceConfig returns a copy of the public registry service's configuration.
 func (s *defaultService) ServiceConfig() *registry.ServiceConfig {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	return s.config.copy()
 }
 
@@ -73,6 +75,14 @@ func (s *defaultService) LoadInsecureRegistries(registries []string) error {
 	defer s.mu.Unlock()
 
 	return s.config.loadInsecureRegistries(registries)
+}
+
+// LoadRegistries loads registries for Service
+func (s *defaultService) LoadRegistries(registries []registry.Registry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.config.LoadRegistries(registries)
 }
 
 // Auth contacts the public registry with the provided credentials,
@@ -191,9 +201,9 @@ func (s *defaultService) Search(ctx context.Context, term string, limit int, aut
 
 // ResolveRepository splits a repository name into its components
 // and configuration of the associated registry.
-func (s *defaultService) ResolveRepository(name reference.Named) (*RepositoryInfo, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *defaultService) ResolveRepository(name dref.Named) (*RepositoryInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return newRepositoryInfo(s.config, name)
 }
 
@@ -208,22 +218,25 @@ type APIEndpoint struct {
 	TLSConfig                      *tls.Config
 }
 
-// LookupPullEndpoints creates a list of v2 endpoints to try to pull from, in order of preference.
-// It gives preference to mirrors over the actual registry, and HTTPS over plain HTTP.
-func (s *defaultService) LookupPullEndpoints(hostname string) (endpoints []APIEndpoint, err error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// LookupPullEndpoints creates a list of endpoints based on the provided
+// reference to try to pull from, in order of preference.  It gives preference
+// to v2 endpoints over v1, mirrors over the actual registry, and HTTPS over
+// plain HTTP.
+func (s *defaultService) LookupPullEndpoints(reference string) (endpoints []APIEndpoint, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	return s.lookupV2Endpoints(hostname)
+	return s.lookupV2Endpoints(reference)
 }
 
-// LookupPushEndpoints creates a list of v2 endpoints to try to push to, in order of preference.
-// It gives preference to HTTPS over plain HTTP. Mirrors are not included.
-func (s *defaultService) LookupPushEndpoints(hostname string) (endpoints []APIEndpoint, err error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// LookupPushEndpoints creates a list of endpoints based on the provided
+// reference to try to push to, in order of preference.  It gives preference to
+// v2 endpoints over v1, and HTTPS over plain HTTP.  Mirrors are not included.
+func (s *defaultService) LookupPushEndpoints(reference string) (endpoints []APIEndpoint, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	allEndpoints, err := s.lookupV2Endpoints(hostname)
+	allEndpoints, err := s.lookupV2Endpoints(reference)
 	if err == nil {
 		for _, endpoint := range allEndpoints {
 			if !endpoint.Mirror {

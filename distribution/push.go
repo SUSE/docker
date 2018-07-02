@@ -25,7 +25,7 @@ func Push(ctx context.Context, ref reference.Named, config *ImagePushConfig) err
 		return err
 	}
 
-	endpoints, err := config.RegistryService.LookupPushEndpoints(reference.Domain(repoInfo.Name))
+	endpoints, err := config.RegistryService.LookupPushEndpoints(ref.Name())
 	if err != nil {
 		return err
 	}

@@ -428,7 +428,7 @@ func (p *puller) pullTag(ctx context.Context, ref reference.Named, platform *spe
 		}
 	}
 
-	logrus.Debugf("Pulling ref from V2 registry: %s", reference.FamiliarString(ref))
+	logrus.Infof("Pulling ref %s from V2 registry %s", reference.FamiliarString(ref), p.endpoint.URL)
 	progress.Message(p.config.ProgressOutput, tagOrDigest, "Pulling from "+reference.FamiliarName(p.repo.Named()))
 
 	var (
