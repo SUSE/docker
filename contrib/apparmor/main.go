@@ -6,9 +6,13 @@ import (
 	"os"
 	"path"
 	"text/template"
+
+	"github.com/moby/moby/v2/pkg/aaparser"
 )
 
-type profileData struct{}
+type profileData struct {
+	Version int
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -17,6 +21,15 @@ func main() {
 
 	// parse the arg
 	apparmorProfilePath := os.Args[1]
+
+	version, err := aaparser.GetVersion()
+	if err != nil {
+		log.Fatal(err)
+	}
+	data := profileData{
+		Version: version,
+	}
+	fmt.Printf("apparmor_parser is of version %+v\n", data)
 
 	// parse the template
 	compiled, err := template.New("apparmor_profile").Parse(dockerProfileTemplate)
@@ -35,7 +48,6 @@ func main() {
 	}
 	defer f.Close()
 
-	data := profileData{}
 	if err := compiled.Execute(f, data); err != nil {
 		log.Fatalf("executing template failed: %v", err)
 	}
