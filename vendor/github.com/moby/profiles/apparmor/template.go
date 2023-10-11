@@ -37,6 +37,7 @@ profile "{{.Name}}" flags=(attach_disconnected,mediate_deleted) {
   capability,
   file,
   umount,
+{{if ge .Version 208096}}
   # Host (privileged) processes may send signals to container processes.
   signal (receive) peer=unconfined,
   # runc may send signals to container processes (for "docker stop").
@@ -47,6 +48,7 @@ profile "{{.Name}}" flags=(attach_disconnected,mediate_deleted) {
   signal (receive) peer="{{.DaemonProfile}}",
   # Container processes may send signals amongst themselves.
   signal (send,receive) peer="{{.Name}}",
+{{end}}
 
   deny @{PROC}/* w,   # deny write for all files directly in /proc (not in a subdir)
   # deny write to files not in /proc/<number>/** or /proc/sys/**
@@ -67,8 +69,10 @@ profile "{{.Name}}" flags=(attach_disconnected,mediate_deleted) {
   deny /sys/devices/virtual/powercap/** rwklx,
   deny /sys/kernel/security/** rwklx,
 
+{{if ge .Version 208095}}
   # allow processes within the container to trace each other,
   # provided all other LSM and yama setting allow it.
   ptrace (trace,tracedby,read,readby) peer="{{.Name}}",
+{{end}}
 }
 `
