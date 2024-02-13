@@ -32,14 +32,20 @@ func Spans(sdl []*tracepb.ResourceSpans) []tracesdk.ReadOnlySpan {
 		}
 
 		for _, sdi := range sd.InstrumentationLibrarySpans {
-			sda := make([]tracesdk.ReadOnlySpan, len(sdi.Spans))
-			for i, s := range sdi.Spans {
-				sda[i] = &readOnlySpan{
+			if sdi == nil {
+				continue
+			}
+			sda := make([]tracesdk.ReadOnlySpan, 0, len(sdi.Spans))
+			for _, s := range sdi.Spans {
+				if s == nil {
+					continue
+				}
+				sda = append(sda, &readOnlySpan{
 					pb:        s,
 					il:        sdi.InstrumentationLibrary,
 					resource:  sd.Resource,
 					schemaURL: sd.SchemaUrl,
-				}
+				})
 			}
 			out = append(out, sda...)
 		}
@@ -165,6 +171,9 @@ var _ tracesdk.ReadOnlySpan = &readOnlySpan{}
 
 // status transform a OTLP span status into span code.
 func statusCode(st *tracepb.Status) codes.Code {
+	if st == nil {
+		return codes.Unset
+	}
 	switch st.Code {
 	case tracepb.Status_STATUS_CODE_ERROR:
 		return codes.Error
@@ -181,6 +190,9 @@ func links(links []*tracepb.Span_Link) []tracesdk.Link {
 
 	sl := make([]tracesdk.Link, 0, len(links))
 	for _, otLink := range links {
+		if otLink == nil {
+			continue
+		}
 		// This redefinition is necessary to prevent otLink.*ID[:] copies
 		// being reused -- in short we need a new otLink per iteration.
 		otLink := otLink
@@ -220,6 +232,9 @@ func spanEvents(es []*tracepb.Span_Event) []tracesdk.Event {
 	for _, e := range es {
 		if messageEvents >= maxMessageEventsPerSpan {
 			break
+		}
+		if e == nil {
+			continue
 		}
 		messageEvents++
 		events = append(events,

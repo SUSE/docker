@@ -577,7 +577,7 @@ github.com/mistifyio/go-zfs/v3
 # github.com/mitchellh/hashstructure/v2 v2.0.2
 ## explicit; go 1.14
 github.com/mitchellh/hashstructure/v2
-# github.com/moby/buildkit v0.11.7-0.20240124010513-435cb77e369c
+# github.com/moby/buildkit v0.11.7-0.20240124010513-435cb77e369c => github.com/SUSE/buildkit v0.0.0-20241218053907-cd804dd86389
 ## explicit; go 1.18
 github.com/moby/buildkit/api/services/control
 github.com/moby/buildkit/api/types
@@ -1313,3 +1313,4 @@ k8s.io/klog/v2/internal/severity
 # resenje.org/singleflight v0.3.0
 ## explicit; go 1.18
 resenje.org/singleflight
+# github.com/moby/buildkit => github.com/SUSE/buildkit v0.0.0-20241218053907-cd804dd86389

@@ -98,6 +98,9 @@ require (
 	resenje.org/singleflight v0.3.0
 )
 
+// github.com/SUSE/buildkit suse-stable-v24.0.9
+replace github.com/moby/buildkit => github.com/SUSE/buildkit v0.0.0-20241218053907-cd804dd86389
+
 require (
 	cloud.google.com/go v0.102.1 // indirect
 	github.com/agext/levenshtein v1.2.3 // indirect
