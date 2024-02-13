@@ -98,6 +98,8 @@ require (
 	resenje.org/singleflight v0.3.0
 )
 
+replace github.com/moby/buildkit => github.com/dcermak/buildkit v0.0.0-20240212085728-98616a35568e
+
 require (
 	cloud.google.com/go v0.102.1 // indirect
 	github.com/agext/levenshtein v1.2.3 // indirect
