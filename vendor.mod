@@ -98,7 +98,7 @@ require (
 	resenje.org/singleflight v0.3.0
 )
 
-replace github.com/moby/buildkit => github.com/dcermak/buildkit v0.0.0-20240212085728-98616a35568e
+replace github.com/moby/buildkit => github.com/cyphar/buildkit v0.0.0-20240622084830-ffc23bbb559c
 
 require (
 	cloud.google.com/go v0.102.1 // indirect
