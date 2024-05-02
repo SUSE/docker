@@ -141,8 +141,8 @@ github.com/PuerkitoBio/urlesc v0.0.0-20160726150825-5bd2802263f2/go.mod h1:uGdko
 github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578/go.mod h1:uGdkoq3SwY9Y+13GIhn11/XLaGBb4BfwItxLd5jeuXE=
 github.com/RackSec/srslog v0.0.0-20180709174129-a4725f04ec91 h1:vX+gnvBc56EbWYrmlhYbFYRaeikAke1GL84N4BEYOFE=
 github.com/RackSec/srslog v0.0.0-20180709174129-a4725f04ec91/go.mod h1:cDLGBht23g0XQdLjzn6xOGXDkLK182YfINAaZEQLCHQ=
-github.com/SUSE/buildkit v0.0.0-20241218053907-cd804dd86389 h1:EKne0CAOXpf1QuZ3+jj7PTpOtSn+q1Yz5H6pAwrOktY=
-github.com/SUSE/buildkit v0.0.0-20241218053907-cd804dd86389/go.mod h1:bMQDryngJKGvJ/ZuRFhrejurbvYSv3NkGCheQ59X4AM=
+github.com/SUSE/buildkit v0.0.0-20241218053911-6b814972ef19 h1:3gfqJcXxLASvlAfgd+TFPrrhNrM+O26HplOhi3BNT+A=
+github.com/SUSE/buildkit v0.0.0-20241218053911-6b814972ef19/go.mod h1:bMQDryngJKGvJ/ZuRFhrejurbvYSv3NkGCheQ59X4AM=
 github.com/Shopify/logrus-bugsnag v0.0.0-20171204204709-577dee27f20d/go.mod h1:HI8ITrYtUY+O+ZhtlqUnD8+KwNPOyugEhfP9fdUIaEQ=
 github.com/agext/levenshtein v1.2.3 h1:YB2fHEn0UJagG8T1rrWknE3ZQzWM06O8AMAatNn7lmo=
 github.com/agext/levenshtein v1.2.3/go.mod h1:JEDfjyjHDjOF/1e4FlBE/PkbqA9OfWu2ki2W0IB5558=

@@ -99,7 +99,7 @@ require (
 )
 
 // github.com/SUSE/buildkit suse-stable-v24.0.9
-replace github.com/moby/buildkit => github.com/SUSE/buildkit v0.0.0-20241218053907-cd804dd86389
+replace github.com/moby/buildkit => github.com/SUSE/buildkit v0.0.0-20241218053911-6b814972ef19
 
 require (
 	cloud.google.com/go v0.102.1 // indirect
