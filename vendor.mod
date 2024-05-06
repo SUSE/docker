@@ -111,6 +111,8 @@ require (
 	tags.cncf.io/container-device-interface v0.6.2
 )
 
+replace github.com/moby/buildkit => github.com/cyphar/buildkit v0.0.0-20240624074721-97db20d3967b
+
 require (
 	cloud.google.com/go v0.110.8 // indirect
 	cloud.google.com/go/compute v1.23.0 // indirect
