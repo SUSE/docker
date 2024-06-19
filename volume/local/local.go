@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker/daemon/names"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/idtools"
+	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/quota"
 	"github.com/docker/docker/volume"
 	"github.com/pkg/errors"
@@ -381,7 +382,7 @@ func (v *localVolume) saveOpts() error {
 	if err != nil {
 		return err
 	}
-	err = os.WriteFile(filepath.Join(v.rootPath, "opts.json"), b, 0600)
+	err = ioutils.AtomicWriteFile(filepath.Join(v.rootPath, "opts.json"), b, 0o600)
 	if err != nil {
 		return errdefs.System(errors.Wrap(err, "error while persisting volume options"))
 	}
