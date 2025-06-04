@@ -151,6 +151,16 @@ func (daemon *Daemon) containerStart(ctx context.Context, container *container.C
 		return err
 	}
 
+	// SUSE:secrets -- Drop any "old" SUSE secrets referenced by this container
+	// (even if this daemon is not compiled with injectSuseSecretStore
+	// enabled). This is necessary because containers secret references are
+	// somewhat permanently associated with containers, so if you were to
+	// restart the container with a different Docker daemon you may end up with
+	// duplicate secrets causing errors (bsc#1057743) or the secret reference
+	// might not be resolveable if you switched to a Docker without the
+	// SUSEConnect patch enabled (bsc#1244035).
+	daemon.clearSuseSecrets(container)
+
 	spec, err := daemon.createSpec(ctx, container)
 	if err != nil {
 		return errdefs.System(err)
