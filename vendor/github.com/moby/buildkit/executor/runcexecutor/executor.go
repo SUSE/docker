@@ -140,6 +140,13 @@ func New(opt Opt, networkProviders map[pb.NetMode]network.Provider) (executor.Ex
 }
 
 func (w *runcExecutor) Run(ctx context.Context, id string, root executor.Mount, mounts []executor.Mount, process executor.ProcessInfo, started chan<- struct{}) (err error) {
+	if id == "" {
+		id = identity.NewID()
+	}
+	if err := executor.ValidContainerID(id); err != nil {
+		return err
+	}
+
 	meta := process.Meta
 
 	startedOnce := sync.Once{}
@@ -200,9 +207,6 @@ func (w *runcExecutor) Run(ctx context.Context, id string, root executor.Mount, 
 		defer release()
 	}
 
-	if id == "" {
-		id = identity.NewID()
-	}
 	bundle := filepath.Join(w.root, id)
 
 	if err := os.Mkdir(bundle, 0711); err != nil {

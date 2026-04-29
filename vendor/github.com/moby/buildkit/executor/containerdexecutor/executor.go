@@ -82,6 +82,9 @@ func (w *containerdExecutor) Run(ctx context.Context, id string, root executor.M
 	if id == "" {
 		id = identity.NewID()
 	}
+	if err := executor.ValidContainerID(id); err != nil {
+		return err
+	}
 
 	startedOnce := sync.Once{}
 	done := make(chan error, 1)
