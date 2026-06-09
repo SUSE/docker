@@ -101,6 +101,15 @@ func (daemon *Daemon) containerExtractToDir(container *container.Container, path
 	container.Lock()
 	defer container.Unlock()
 
+	// Decompress the archive before switching into the container's
+	// filesystem to avoid executing decompression binaries (xz, unpigz)
+	// that may have been placed inside the container image.
+	decompressed, err := archive.DecompressStream(content)
+	if err != nil {
+		return err
+	}
+	defer decompressed.Close()
+
 	cfs, err := daemon.openContainerFS(container)
 	if err != nil {
 		return err
@@ -150,7 +159,7 @@ func (daemon *Daemon) containerExtractToDir(container *container.Container, path
 			}
 		}
 
-		return archive.Untar(content, absPath, options)
+		return archive.UntarUncompressed(decompressed, absPath, options)
 	})
 	if err != nil {
 		return err
