@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+
+	"github.com/moby/moby/v2/pkg/aaparser"
 )
 
 // profileDirectory is the file store for AppArmor profiles and macros.
@@ -33,6 +35,8 @@ type profileData struct {
 	Imports []string
 	// InnerImports defines the AppArmor functions to import in the profile.
 	InnerImports []string
+	// Version is the {major, minor, patch} version of apparmor_parser as a single number.
+	Version int
 }
 
 // generate creates an AppArmor profile from ProfileData.
@@ -60,6 +64,12 @@ func generate(p *profileData, out io.Writer, macroExistsFn func(string) bool) er
 	if macroExistsFn("abstractions/base") {
 		p.InnerImports = append(p.InnerImports, "#include <abstractions/base>")
 	}
+
+	ver, err := aaparser.GetVersion()
+	if err != nil {
+		return err
+	}
+	p.Version = ver
 
 	return compiled.Execute(out, p)
 }
