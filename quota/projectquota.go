@@ -361,6 +361,14 @@ func (q *Control) findNextProjectID(home string, baseID uint32) error {
 			if !subfile.IsDir() {
 				continue
 			}
+			// Skip "merged" directories -- these are overlayfs mountpoints
+			// that don't support the FS_IOC_FSGETXATTR ioctl on older kernels
+			// (e.g. when the mount is still active across a live-restore
+			// daemon restart), which would otherwise cause project quota
+			// support to be incorrectly disabled for the whole session.
+			if subfile.Name() == "merged" {
+				continue
+			}
 			subpath := filepath.Join(path, subfile.Name())
 			_, err := checkProjID(subpath)
 			if err != nil {
