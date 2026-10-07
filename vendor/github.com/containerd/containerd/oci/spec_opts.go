@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -594,13 +595,31 @@ func WithUser(userstr string) SpecOpts {
 			return nil
 		}
 
+		const (
+			minUserID  = 0
+			maxUserID  = math.MaxInt32
+			minGroupID = 0
+			maxGroupID = math.MaxInt32
+		)
+
+		isErrRange := func(err error) bool {
+			var numErr *strconv.NumError
+			return errors.As(err, &numErr) && numErr.Err == strconv.ErrRange
+		}
+
 		parts := strings.Split(userstr, ":")
 		switch len(parts) {
 		case 1:
 			v, err := strconv.Atoi(parts[0])
 			if err != nil {
-				// if we cannot parse as a uint they try to see if it is a username
+				if isErrRange(err) {
+					return fmt.Errorf("invalid USER value %q: uid out of range", userstr)
+				}
+				// Non-numeric user value; treat it as a username.
 				return WithUsername(userstr)(ctx, client, c, s)
+			}
+			if v < minUserID || v > maxUserID {
+				return fmt.Errorf("invalid USER value %q: uid out of range", userstr)
 			}
 			return WithUserID(uint32(v))(ctx, client, c, s)
 		case 2:
@@ -611,12 +630,22 @@ func WithUser(userstr string) SpecOpts {
 			var uid, gid uint32
 			v, err := strconv.Atoi(parts[0])
 			if err != nil {
+				if isErrRange(err) {
+					return fmt.Errorf("invalid USER value %q: uid out of range", userstr)
+				}
 				username = parts[0]
+			} else if v < minUserID || v > maxUserID {
+				return fmt.Errorf("invalid USER value %q: uid out of range", userstr)
 			} else {
 				uid = uint32(v)
 			}
 			if v, err = strconv.Atoi(parts[1]); err != nil {
+				if isErrRange(err) {
+					return fmt.Errorf("invalid USER value %q: gid out of range", userstr)
+				}
 				groupname = parts[1]
+			} else if v < minGroupID || v > maxGroupID {
+				return fmt.Errorf("invalid USER value %q: gid out of range", userstr)
 			} else {
 				gid = uint32(v)
 			}
