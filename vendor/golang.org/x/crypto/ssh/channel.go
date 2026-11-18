@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -165,6 +166,15 @@ type channel struct {
 	// decided is set to true if an accept or reject message has been sent
 	// (for outbound channels) or received (for inbound channels).
 	decided bool
+
+	// established is set to 1 (via atomic store) once the channel is open
+	// and may carry normal channel traffic: for an outbound channel when
+	// the peer's open confirmation is received, for an inbound channel
+	// when the local side accepts it. It is set and read from different
+	// goroutines, hence the atomic access. A plain uint32 is used instead
+	// of atomic.Bool (Go 1.19+) since this vendored package's own go.mod
+	// declares go 1.17.
+	established uint32
 
 	// direction contains either channelOutbound, for channels created
 	// locally, or channelInbound, for channels created by the peer.
@@ -392,10 +402,20 @@ func (ch *channel) responseMessageReceived() error {
 		return errors.New("ssh: duplicate response received for channel")
 	}
 	ch.decided = true
+	atomic.StoreUint32(&ch.established, 1)
 	return nil
 }
 
 func (ch *channel) handlePacket(packet []byte) error {
+	// Only the open response is expected before the channel is established.
+	if atomic.LoadUint32(&ch.established) == 0 {
+		switch packet[0] {
+		case msgChannelOpenConfirm, msgChannelOpenFailure:
+		default:
+			return nil
+		}
+	}
+
 	switch packet[0] {
 	case msgChannelData, msgChannelExtendedData:
 		return ch.handleData(packet)
@@ -449,7 +469,8 @@ func (ch *channel) handlePacket(packet []byte) error {
 
 		ch.incomingRequests <- &req
 	default:
-		ch.msg <- msg
+		// No other message type is expected on an established channel.
+		return fmt.Errorf("ssh: unexpected message type %d on channel %d", packet[0], ch.localId)
 	}
 	return nil
 }
@@ -500,6 +521,7 @@ func (ch *channel) Accept() (Channel, <-chan *Request, error) {
 		MaxPacketSize: ch.maxIncomingPayload,
 	}
 	ch.decided = true
+	atomic.StoreUint32(&ch.established, 1)
 	if err := ch.sendMessage(confirm); err != nil {
 		return nil, nil, err
 	}

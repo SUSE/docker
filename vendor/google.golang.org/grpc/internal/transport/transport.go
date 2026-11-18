@@ -31,10 +31,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/internal/channelz"
+	"google.golang.org/grpc/internal/envconfig"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/resolver"
@@ -43,7 +45,26 @@ import (
 	"google.golang.org/grpc/tap"
 )
 
-const logLevel = 2
+const (
+	logLevel = 2
+
+	// recvMsgSize estimates the per-entry memory overhead of a recvMsg
+	// sitting in a recvBuffer's backlog: the recvMsg struct itself plus the
+	// bytes.Buffer it points to (header only; its own backing array is
+	// accounted for separately via its Len()).
+	recvMsgSize = int(unsafe.Sizeof(recvMsg{}) + unsafe.Sizeof(bytes.Buffer{}))
+
+	// utilizationFactor controls when memory utilization is considered
+	// acceptable. Compaction is skipped as long as
+	// backlogHeapSize <= utilizationFactor * payloadBytes, i.e. at least
+	// 1/utilizationFactor of the heap memory in play is actual payload.
+	utilizationFactor = 2
+
+	// compactionThreshold is the minimum estimated backlog heap size (in
+	// bytes) before compaction kicks in, so short bursts of small frames
+	// aren't compacted eagerly. ~1024 recvMsg entries' worth of overhead.
+	compactionThreshold = 1024 * recvMsgSize
+)
 
 type bufferPool struct {
 	pool sync.Pool
@@ -87,7 +108,13 @@ type recvBuffer struct {
 	c       chan recvMsg
 	mu      sync.Mutex
 	backlog []recvMsg
-	err     error
+	// uncompactedSuffixLen tracks the number of consecutive data messages
+	// at the tail of backlog that have not been compacted.
+	uncompactedSuffixLen int
+	// uncompactedBytes tracks the total payload bytes across the trailing
+	// uncompactedSuffixLen messages.
+	uncompactedBytes int
+	err              error
 }
 
 func newRecvBuffer() *recvBuffer {
@@ -115,7 +142,57 @@ func (b *recvBuffer) put(r recvMsg) {
 		}
 	}
 	b.backlog = append(b.backlog, r)
+	b.compactBacklogLocked(r)
 	b.mu.Unlock()
+}
+
+// compactBacklogLocked coalesces a trailing run of small, individually
+// pool-allocated recvMsg payloads into a single larger buffer once the
+// per-message tracking overhead (recvMsgSize per entry) becomes large
+// relative to the actual payload bytes buffered. This bounds the memory
+// amplification a peer can cause by fragmenting a stream's payload into
+// many tiny (e.g. 1-byte) HTTP/2 DATA frames. Must be called with b.mu held.
+func (b *recvBuffer) compactBacklogLocked(r recvMsg) {
+	if !envconfig.EnableReceiveBufferCompaction {
+		return
+	}
+	if r.buffer == nil {
+		// Not a data message (e.g. terminal error/EOF): the run of
+		// uncompacted data messages, if any, has ended.
+		b.uncompactedSuffixLen = 0
+		b.uncompactedBytes = 0
+		return
+	}
+
+	b.uncompactedSuffixLen++
+	b.uncompactedBytes += r.buffer.Len()
+	backlogHeapSize := b.uncompactedSuffixLen*recvMsgSize + b.uncompactedBytes
+
+	if backlogHeapSize <= utilizationFactor*b.uncompactedBytes {
+		// Payload dominates overhead (e.g. a large DATA frame arrived);
+		// nothing to compact.
+		b.uncompactedSuffixLen = 0
+		b.uncompactedBytes = 0
+		return
+	}
+	if backlogHeapSize <= compactionThreshold {
+		// Not enough accumulated yet to be worth compacting.
+		return
+	}
+
+	startIdx := len(b.backlog) - b.uncompactedSuffixLen
+	combined := bytes.NewBuffer(make([]byte, 0, b.uncompactedBytes))
+	for i := startIdx; i < len(b.backlog); i++ {
+		combined.Write(b.backlog[i].buffer.Bytes())
+		b.backlog[i] = recvMsg{}
+	}
+	b.backlog[startIdx] = recvMsg{buffer: combined}
+	b.backlog = b.backlog[:startIdx+1]
+
+	// The suffix is now a single message; its utilization is close to 1.0
+	// (one recvMsg's overhead against the whole combined payload).
+	b.uncompactedSuffixLen = 0
+	b.uncompactedBytes = 0
 }
 
 func (b *recvBuffer) load() {
@@ -123,6 +200,15 @@ func (b *recvBuffer) load() {
 	if len(b.backlog) > 0 {
 		select {
 		case b.c <- b.backlog[0]:
+			// backlog[0] is only part of the tracked uncompacted suffix if
+			// the entire backlog currently consists of that suffix; if an
+			// earlier compaction or reset occurred, backlog[0] is already
+			// compacted (or isn't a data message) and must not be
+			// double-subtracted here.
+			if envconfig.EnableReceiveBufferCompaction && b.uncompactedSuffixLen == len(b.backlog) && b.backlog[0].buffer != nil {
+				b.uncompactedSuffixLen--
+				b.uncompactedBytes -= b.backlog[0].buffer.Len()
+			}
 			b.backlog[0] = recvMsg{}
 			b.backlog = b.backlog[1:]
 		default:

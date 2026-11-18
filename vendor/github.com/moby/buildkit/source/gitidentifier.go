@@ -7,6 +7,7 @@ import (
 
 	srctypes "github.com/moby/buildkit/source/types"
 	"github.com/moby/buildkit/util/sshutil"
+	"github.com/pkg/errors"
 )
 
 type GitIdentifier struct {
@@ -58,6 +59,61 @@ func (i *GitIdentifier) ID() string {
 // the prefix of the string for known protocols used in git.
 func isGitTransport(str string) bool {
 	return strings.HasPrefix(str, "http://") || strings.HasPrefix(str, "https://") || strings.HasPrefix(str, "git://") || strings.HasPrefix(str, "ssh://") || sshutil.IsImplicitSSHTransport(str)
+}
+
+// validateFullRemoteURL requires fullURL to resolve to the same host and
+// repository path as originalRemote (an already-normalized GitIdentifier.Remote),
+// returning fullURL unchanged if so. This prevents the git.fullurl attribute
+// from retargeting a build step's actual clone URL to a different repository
+// than the one its source identifier - and thus any source policy matched
+// against that identifier - describes.
+func validateFullRemoteURL(originalRemote, fullURL string) (string, error) {
+	if !isGitTransport(fullURL) {
+		fullURL = "https://" + fullURL
+	}
+	fullHost, fullPath, err := gitRemoteHostPath(fullURL)
+	if err != nil {
+		return "", errors.New("failed to parse git.fullurl")
+	}
+
+	origHost, origPath, err := gitRemoteHostPath(originalRemote)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to parse Git source identifier")
+	}
+
+	if !strings.EqualFold(origHost, fullHost) || gitRepositoryPath(origPath) != gitRepositoryPath(fullPath) {
+		return "", errors.New("git.fullurl does not match source identifier")
+	}
+	return fullURL, nil
+}
+
+// gitRepositoryPath canonicalizes a URL path for repository-identity
+// comparison, matching the canonicalization NewGitIdentifier/ParseGitRef apply
+// to identifiers (treating "/user/repo" and "/user/repo.git" as equivalent).
+func gitRepositoryPath(p string) string {
+	return strings.TrimSuffix(path.Join("/", p), ".git")
+}
+
+// gitRemoteHostPath extracts the host and path from a git remote URL, which
+// may be an implicit SCP-style URL (user@host:path) that net/url.Parse cannot
+// handle directly.
+func gitRemoteHostPath(remote string) (host, repoPath string, err error) {
+	if sshutil.IsImplicitSSHTransport(remote) {
+		rest := remote
+		if at := strings.Index(remote, "@"); at >= 0 {
+			rest = remote[at+1:]
+		}
+		colon := strings.Index(rest, ":")
+		if colon < 0 {
+			return "", "", errors.Errorf("invalid scp-style git URL %q", remote)
+		}
+		return rest[:colon], rest[colon+1:], nil
+	}
+	u, err := url.Parse(remote)
+	if err != nil {
+		return "", "", err
+	}
+	return u.Host, u.Path, nil
 }
 
 func getRefAndSubdir(fragment string) (ref string, subdir string) {

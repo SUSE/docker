@@ -3,7 +3,6 @@ package ops
 import (
 	"context"
 	"encoding/json"
-	"os"
 
 	"github.com/containerd/continuity/fs"
 	"github.com/moby/buildkit/client/llb"
@@ -13,6 +12,7 @@ import (
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/llbsolver/ops/opsutils"
 	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/util/openfile"
 	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
@@ -111,7 +111,7 @@ func (b *BuildOp) Exec(ctx context.Context, g session.Group, inputs []solver.Res
 		return nil, errors.Wrapf(err, "working dir %s points to invalid target", fn)
 	}
 
-	f, err := os.Open(newfn)
+	f, err := openfile.Regular(newfn)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to open %s", newfn)
 	}

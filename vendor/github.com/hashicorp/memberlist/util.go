@@ -280,11 +280,14 @@ func decompressBuffer(c *compress) ([]byte, error) {
 	uncomp := lzw.NewReader(bytes.NewReader(c.Buf), lzw.LSB, lzwLitWidth)
 	defer uncomp.Close()
 
-	// Read all the data
+	// Ensure a compressMsg can't decompress to too much data.
 	var b bytes.Buffer
-	_, err := io.Copy(&b, uncomp)
-	if err != nil {
+	n, err := io.CopyN(&b, uncomp, maxDecompressedBytes+1)
+	if err != nil && err != io.EOF {
 		return nil, err
+	}
+	if n > maxDecompressedBytes {
+		return nil, fmt.Errorf("decompressed message is larger than limit (%d)", maxDecompressedBytes)
 	}
 
 	// Return the uncompressed bytes

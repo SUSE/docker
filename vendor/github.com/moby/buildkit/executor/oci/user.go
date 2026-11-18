@@ -9,6 +9,7 @@ import (
 	"github.com/containerd/containerd/containers"
 	containerdoci "github.com/containerd/containerd/oci"
 	"github.com/containerd/continuity/fs"
+	"github.com/moby/buildkit/util/openfile"
 	"github.com/opencontainers/runc/libcontainer/user"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
@@ -72,7 +73,7 @@ func openUserFile(root, p string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return os.Open(p)
+	return openfile.Regular(p)
 }
 
 func parseUID(str string) (uint32, error) {

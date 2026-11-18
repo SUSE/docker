@@ -285,6 +285,7 @@ type gatewayContainer struct {
 	mounts     []executor.Mount
 	executor   executor.Executor
 	started    bool
+	closed     bool
 	errGroup   *errgroup.Group
 	mu         sync.Mutex
 	cleanup    []func() error
@@ -321,12 +322,13 @@ func (gwCtr *gatewayContainer) Start(ctx context.Context, req client.StartReques
 		procInfo.Meta.Env = addDefaultEnvvar(procInfo.Meta.Env, "TERM", "xterm")
 	}
 
-	// mark that we have started on the first call to execProcess for this
-	// container, so that future calls will call Exec rather than Run
+	// Register the process while holding the lifecycle lock so Release cannot
+	// begin waiting until every admitted process is visible in gwCtr.errGroup.
 	gwCtr.mu.Lock()
-	started := gwCtr.started
-	gwCtr.started = true
-	gwCtr.mu.Unlock()
+	if gwCtr.closed {
+		gwCtr.mu.Unlock()
+		return nil, errors.New("container is closed")
+	}
 
 	eg, ctx := errgroup.WithContext(gwCtr.ctx)
 	gwProc := &gatewayContainerProcess{
@@ -336,17 +338,19 @@ func (gwCtr *gatewayContainer) Start(ctx context.Context, req client.StartReques
 		groupCtx: ctx,
 	}
 
+	// mark that we have started on the first call to execProcess for this
+	// container, so that future calls will call Exec rather than Run
+	started := gwCtr.started
+	gwCtr.started = true
+
+	var startedCh chan struct{}
 	if !started {
-		startedCh := make(chan struct{})
+		startedCh = make(chan struct{})
 		gwProc.errGroup.Go(func() error {
 			bklog.G(gwCtr.ctx).Debugf("Starting new container for %s with args: %q", gwCtr.id, procInfo.Meta.Args)
 			err := gwCtr.executor.Run(ctx, gwCtr.id, gwCtr.rootFS, gwCtr.mounts, procInfo, startedCh)
 			return stack.Enable(err)
 		})
-		select {
-		case <-ctx.Done():
-		case <-startedCh:
-		}
 	} else {
 		gwProc.errGroup.Go(func() error {
 			bklog.G(gwCtr.ctx).Debugf("Execing into container %s with args: %q", gwCtr.id, procInfo.Meta.Args)
@@ -356,6 +360,14 @@ func (gwCtr *gatewayContainer) Start(ctx context.Context, req client.StartReques
 	}
 
 	gwCtr.errGroup.Go(gwProc.errGroup.Wait)
+	gwCtr.mu.Unlock()
+
+	if startedCh != nil {
+		select {
+		case <-ctx.Done():
+		case <-startedCh:
+		}
+	}
 
 	return gwProc, nil
 }
@@ -363,6 +375,7 @@ func (gwCtr *gatewayContainer) Start(ctx context.Context, req client.StartReques
 func (gwCtr *gatewayContainer) Release(ctx context.Context) error {
 	gwCtr.mu.Lock()
 	defer gwCtr.mu.Unlock()
+	gwCtr.closed = true
 	gwCtr.cancel()
 	err1 := gwCtr.errGroup.Wait()
 

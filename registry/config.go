@@ -284,9 +284,19 @@ func (config *serviceConfig) isSecureIndex(indexName string) bool {
 	return !isCIDRMatch(config.InsecureRegistryCIDRs, indexName)
 }
 
-// isCIDRMatch returns true if URLHost matches an element of cidrs. URLHost is a URL.Host (`host:port` or `host`)
-// where the `host` part can be either a domain name or an IP address. If it is a domain name, then it will be
-// resolved to IP addresses for matching. If resolution fails, false is returned.
+// isCIDRMatch returns true if all of URLHost's resolved addresses match an
+// element of cidrs. URLHost is a URL.Host (`host:port` or `host`) where the
+// `host` part can be either a domain name or an IP address. If it is a domain
+// name, then it will be resolved to IP addresses for matching. If resolution
+// fails, or no addresses could be determined, false is returned.
+//
+// Every resolved address must match, not just one: the transport which
+// actually connects to the registry resolves and dials the hostname again
+// rather than the specific address that matched here, so if only some of a
+// host's addresses fall in an insecure subnet, a hostname that happens to
+// also resolve to one of them would let a single forged/attacker-controlled
+// address disable certificate verification and HTTP fallback for the whole
+// registry.
 func isCIDRMatch(cidrs []*registry.NetIPNet, URLHost string) bool {
 	host, _, err := net.SplitHostPort(URLHost)
 	if err != nil {
@@ -306,17 +316,25 @@ func isCIDRMatch(cidrs []*registry.NetIPNet, URLHost string) bool {
 		// So, len(addrs) == 0 and we're not aborting.
 	}
 
-	// Try CIDR notation only if addrs has any elements, i.e. if `host`'s IP could be determined.
+	if len(addrs) == 0 {
+		return false
+	}
+
 	for _, addr := range addrs {
+		matched := false
 		for _, ipnet := range cidrs {
 			// check if the addr falls in the subnet
 			if (*net.IPNet)(ipnet).Contains(addr) {
-				return true
+				matched = true
+				break
 			}
+		}
+		if !matched {
+			return false
 		}
 	}
 
-	return false
+	return true
 }
 
 // ValidateMirror validates an HTTP(S) registry mirror

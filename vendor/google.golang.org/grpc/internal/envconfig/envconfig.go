@@ -48,6 +48,16 @@ var (
 	// A future release will remove this environment variable, enabling strict
 	// path checking behavior unconditionally.
 	DisableStrictPathChecking = boolFromEnv("GRPC_GO_EXPERIMENTAL_DISABLE_STRICT_PATH_CHECKING", false)
+
+	// EnableReceiveBufferCompaction controls whether the transport
+	// compacts small buffered DATA frame payloads in a stream's receive
+	// backlog into a single larger buffer once their per-message tracking
+	// overhead becomes excessive relative to actual payload size. This
+	// defends against a peer fragmenting a stream's payload into many
+	// tiny (e.g. 1-byte) DATA frames to cause heap memory amplification.
+	// Can be disabled by setting the environment variable
+	// GRPC_GO_EXPERIMENTAL_ENABLE_RECEIVE_BUFFER_COMPACTION to "false".
+	EnableReceiveBufferCompaction = boolFromEnv("GRPC_GO_EXPERIMENTAL_ENABLE_RECEIVE_BUFFER_COMPACTION", true)
 )
 
 func boolFromEnv(envVar string, def bool) bool {

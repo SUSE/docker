@@ -3,7 +3,7 @@ package attestation
 import (
 	"context"
 	"encoding/json"
-	"os"
+	"io"
 
 	"github.com/containerd/continuity/fs"
 	intoto "github.com/in-toto/in-toto-golang/in_toto"
@@ -12,6 +12,7 @@ import (
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/snapshot"
 	"github.com/moby/buildkit/solver/result"
+	"github.com/moby/buildkit/util/openfile"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 )
@@ -41,7 +42,12 @@ func ReadAll(ctx context.Context, s session.Group, att exporter.Attestation) ([]
 		if err != nil {
 			return nil, err
 		}
-		content, err = os.ReadFile(p)
+		f, err := openfile.Regular(p)
+		if err != nil {
+			return nil, errors.Wrap(err, "cannot read in-toto attestation")
+		}
+		content, err = io.ReadAll(f)
+		f.Close()
 		if err != nil {
 			return nil, errors.Wrap(err, "cannot read in-toto attestation")
 		}

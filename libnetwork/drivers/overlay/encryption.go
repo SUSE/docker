@@ -169,6 +169,17 @@ func setupEncryption(localIP, advIP, remoteIP net.IP, em *encrMap, keys []*key) 
 	logrus.Debugf("Programming encryption between %s and %s", localIP, remoteIP)
 	rIPs := remoteIP.String()
 
+	// Block userspace from marking arbitrary packets for encryption using
+	// the security association we are about to program into the kernel.
+	// ProgramRule is idempotent (it checks before it acts), so calling this
+	// on every peer added is safe; it is not gated on em being previously
+	// empty like upstream's equivalent check, since nothing in this driver
+	// version ever removes an entry from em.nodes (see removeEncryption),
+	// which would make that gate a dead branch here anyway.
+	if err := programMangleMarkSpoofProtection(true); err != nil {
+		return err
+	}
+
 	indices := make([]*spi, 0, len(keys))
 
 	for i, k := range keys {
@@ -205,6 +216,14 @@ func removeEncryption(localIP, remoteIP net.IP, em *encrMap) error {
 	if !ok {
 		return nil
 	}
+
+	// Deliberately not removing the spoof-protection mangle rule installed
+	// by setupEncryption here, unlike upstream's equivalent (which removes
+	// it once its peer map becomes empty): this function never deletes
+	// remoteIP's entry from em.nodes, so em would never actually become
+	// empty, and leaving the rule installed is the fail-safe direction
+	// anyway - it only ever strips an encryption mark that should not have
+	// been there in the first place.
 	for i, idxs := range indices {
 		dir := reverse
 		if i == 0 {
@@ -237,13 +256,71 @@ func programMangle(vni uint32, add bool) error {
 	// TODO IPv6 support
 	iptable := iptables.GetIptable(iptables.IPv4)
 
+	// Clear out a stale mangle rule left behind by a daemon predating this
+	// fix, which indiscriminately marked both authentic and forged VXLAN
+	// datagrams for encryption.
+	staleErr := iptable.ProgramRule(iptables.Mangle, chain, iptables.Delete, rule)
+	if staleErr != nil {
+		staleErr = fmt.Errorf("could not clear old mangle rule: %w", staleErr)
+	}
+
+	if !add {
+		a = iptables.Delete
+		action = "remove"
+	}
+
+	// Mark authentic VXLAN packets to be encrypted, skipping forged packets
+	// with the same VNI.
+	//
+	// Only packets sent from this network namespace are evaluated by the
+	// OUTPUT chain so we do not need to explicitly guard against marking
+	// forged packets sent by processes from other network namespaces. We
+	// only need to distinguish authentic packets encapsulated by our VXLAN
+	// links (which are sent from this network namespace) from forged
+	// packets sent by processes in this network namespace. All forged
+	// packets processed by the OUTPUT chain will match --socket-exists. Our
+	// authentic VXLAN packets will not match as they are associated with
+	// foreign sockets from containers' namespaces or with no socket at all.
+	rule = append([]string{"-m", "owner", "!", "--socket-exists"}, rule...)
+	if err := iptable.ProgramRule(iptables.Mangle, chain, a, rule); err != nil {
+		return fmt.Errorf("could not %s mangle rule: %w", action, err)
+	}
+
+	return staleErr
+}
+
+// programMangleMarkSpoofProtection installs or removes the mangle rule which
+// strips the encryption mark from packets associated with a local socket,
+// closing the confused-deputy hole where an unprivileged process with
+// CAP_NET_RAW could use setsockopt(SO_MARK) to get an arbitrary forged VXLAN
+// datagram encrypted and injected into a peer's overlay network. It also
+// neutralizes any unrestricted mangle rule left behind by a pre-fix daemon
+// for a VNI this node never reprograms, so it must be evaluated after every
+// rule installed by programMangle - which is why it is appended rather than
+// inserted at the head of the chain.
+func programMangleMarkSpoofProtection(add bool) error {
+	var (
+		chain = "OUTPUT"
+		rule  = []string{
+			"-p", "udp", "--dport", strconv.FormatUint(uint64(overlayutils.VXLANUDPPort()), 10),
+			"-m", "owner", "--socket-exists",
+			"-m", "mark", "--mark", strconv.FormatUint(mark, 10),
+			"-j", "MARK", "--set-mark", "0",
+		}
+		a      = iptables.Append
+		action = "install"
+	)
+
+	// TODO IPv6 support
+	iptable := iptables.GetIptable(iptables.IPv4)
+
 	if !add {
 		a = iptables.Delete
 		action = "remove"
 	}
 
 	if err := iptable.ProgramRule(iptables.Mangle, chain, a, rule); err != nil {
-		return fmt.Errorf("could not %s mangle rule: %w", action, err)
+		return fmt.Errorf("could not %s mangle local-spoof-protection rule: %w", action, err)
 	}
 
 	return nil

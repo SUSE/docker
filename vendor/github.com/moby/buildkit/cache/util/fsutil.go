@@ -8,6 +8,7 @@ import (
 
 	"github.com/containerd/continuity/fs"
 	"github.com/moby/buildkit/snapshot"
+	"github.com/moby/buildkit/util/openfile"
 	"github.com/pkg/errors"
 	"github.com/tonistiigi/fsutil"
 	fstypes "github.com/tonistiigi/fsutil/types"
@@ -57,18 +58,25 @@ func ReadFile(ctx context.Context, mount snapshot.Mountable, req ReadRequest) ([
 			return errors.WithStack(err)
 		}
 
+		f, err := openfile.Regular(fp)
+		if err != nil {
+			// The filename here is internal to the mount, so we can restore
+			// the request base path for error reporting.
+			pe := &os.PathError{}
+			if errors.As(err, &pe) {
+				pe.Path = req.Filename
+			}
+			return err
+		}
+		defer f.Close()
+
 		if req.Range == nil {
-			dt, err = os.ReadFile(fp)
+			dt, err = io.ReadAll(f)
 			if err != nil {
 				return errors.WithStack(err)
 			}
 		} else {
-			f, err := os.Open(fp)
-			if err != nil {
-				return errors.WithStack(err)
-			}
 			dt, err = io.ReadAll(io.NewSectionReader(f, int64(req.Range.Offset), int64(req.Range.Length)))
-			f.Close()
 			if err != nil {
 				return errors.WithStack(err)
 			}

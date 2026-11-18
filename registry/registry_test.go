@@ -674,14 +674,22 @@ func TestIsSecureIndex(t *testing.T) {
 		{IndexName, nil, true},
 		{"example.com", []string{}, true},
 		{"example.com", []string{"example.com"}, false},
-		{"localhost", []string{"localhost:5000"}, false},
+		// "localhost" resolves to both 127.0.0.1 and ::1 (see the lookupIP
+		// mock below). isCIDRMatch now requires every resolved address to
+		// fall within an insecure subnet, and this version's default
+		// insecure CIDRs only cover 127.0.0.0/8 (unlike newer upstream,
+		// which also defaults to ::1/128) - so with no insecure-registry
+		// config that also covers ::1, "localhost" alone is correctly
+		// treated as secure now, rather than being declared insecure on
+		// the strength of only its IPv4 address matching.
+		{"localhost", []string{"localhost:5000"}, true},
 		{"localhost:5000", []string{"localhost:5000"}, false},
-		{"localhost", []string{"example.com"}, false},
+		{"localhost", []string{"example.com"}, true},
 		{"127.0.0.1:5000", []string{"127.0.0.1:5000"}, false},
-		{"localhost", nil, false},
-		{"localhost:5000", nil, false},
+		{"localhost", nil, true},
+		{"localhost:5000", nil, true},
 		{"127.0.0.1", nil, false},
-		{"localhost", []string{"example.com"}, false},
+		{"localhost", []string{"example.com"}, true},
 		{"127.0.0.1", []string{"example.com"}, false},
 		{"example.com", nil, true},
 		{"example.com", []string{"example.com"}, false},

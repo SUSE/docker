@@ -158,6 +158,9 @@ func applyNaive(ctx context.Context, root string, r io.Reader, options ApplyOpti
 		// Used for handling opaque directory markers which
 		// may occur out of order
 		unpackedPaths = make(map[string]struct{})
+		// Used for tracking directories that have already processed an
+		// opaque directory marker to avoid redundant directory walks
+		opaqueDirs = make(map[string]struct{})
 
 		convertWhiteout = options.ConvertWhiteout
 	)
@@ -168,6 +171,11 @@ func applyNaive(ctx context.Context, root string, r io.Reader, options ApplyOpti
 			base := filepath.Base(path)
 			dir := filepath.Dir(path)
 			if base == whiteoutOpaqueDir {
+				if _, ok := opaqueDirs[dir]; ok {
+					return false, nil
+				}
+				opaqueDirs[dir] = struct{}{}
+
 				_, err := os.Lstat(dir)
 				if err != nil {
 					return false, err
@@ -184,7 +192,12 @@ func applyNaive(ctx context.Context, root string, r io.Reader, options ApplyOpti
 					}
 					if _, exists := unpackedPaths[path]; !exists {
 						err := os.RemoveAll(path)
-						return err
+						if err != nil {
+							return err
+						}
+						if info.IsDir() {
+							return filepath.SkipDir
+						}
 					}
 					return nil
 				})

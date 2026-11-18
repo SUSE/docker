@@ -297,16 +297,12 @@ func Build(ctx context.Context, c client.Client) (_ *client.Result, err error) {
 			return err
 		}
 
-		dtDockerfile, err = ref.ReadFile(ctx2, client.ReadRequest{
-			Filename: filename,
-		})
+		dtDockerfile, err = readFile(ctx2, ref, filename)
 		if err != nil {
 			fallback := false
-			if path.Base(filename) == defaultDockerfileName {
+			if path.Base(filename) == defaultDockerfileName && !isFileTooLarge(err) {
 				var err1 error
-				dtDockerfile, err1 = ref.ReadFile(ctx2, client.ReadRequest{
-					Filename: path.Join(path.Dir(filename), strings.ToLower(defaultDockerfileName)),
-				})
+				dtDockerfile, err1 = readFile(ctx2, ref, path.Join(path.Dir(filename), strings.ToLower(defaultDockerfileName)))
 				if err1 == nil {
 					fallback = true
 				}
@@ -319,11 +315,13 @@ func Build(ctx context.Context, c client.Client) (_ *client.Result, err error) {
 		sourceMap = llb.NewSourceMap(&src, filename, dtDockerfile)
 		sourceMap.Definition = def
 
-		dt, err := ref.ReadFile(ctx2, client.ReadRequest{
-			Filename: filename + ".dockerignore",
-		})
+		// a missing ignore file is not an error, but an oversized one must
+		// not be silently skipped
+		dt, err := readFile(ctx2, ref, filename+".dockerignore")
 		if err == nil {
 			dtDockerignore = dt
+		} else if isFileTooLarge(err) {
+			return err
 		}
 		return nil
 	})
@@ -355,10 +353,13 @@ func Build(ctx context.Context, c client.Client) (_ *client.Result, err error) {
 			if err != nil {
 				return err
 			}
-			dtDockerignoreDefault, err = ref.ReadFile(ctx2, client.ReadRequest{
-				Filename: dockerignoreFilename,
-			})
+			// a missing ignore file is not an error, but an oversized one
+			// must not be silently skipped
+			dtDockerignoreDefault, err = readFile(ctx2, ref, dockerignoreFilename)
 			if err != nil {
+				if isFileTooLarge(err) {
+					return err
+				}
 				return nil
 			}
 			return nil
@@ -1048,9 +1049,12 @@ func contextByName(ctx context.Context, c client.Client, sessionID, name string,
 		if err != nil {
 			return nil, nil, err
 		}
-		dt, _ := ref.ReadFile(ctx, client.ReadRequest{
-			Filename: dockerignoreFilename,
-		}) // error ignored
+		// a missing ignore file is not an error, but an oversized one must
+		// not be silently skipped
+		dt, err := readFile(ctx, ref, dockerignoreFilename)
+		if isFileTooLarge(err) {
+			return nil, nil, err
+		}
 		var excludes []string
 		if len(dt) != 0 {
 			excludes, err = dockerignore.ReadAll(bytes.NewBuffer(dt))

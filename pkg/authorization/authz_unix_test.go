@@ -7,7 +7,6 @@
 package authorization // import "github.com/docker/docker/pkg/authorization"
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"net"
@@ -140,36 +139,77 @@ func TestResponseModifier(t *testing.T) {
 	}
 }
 
-func TestDrainBody(t *testing.T) {
-	tests := []struct {
-		length             int // length is the message length send to drainBody
-		expectedBodyLength int // expectedBodyLength is the expected body length after drainBody is called
-	}{
-		{10, 10},                           // Small message size
-		{maxBodySize - 1, maxBodySize - 1}, // Max message size
-		{maxBodySize * 2, 0},               // Large message size (skip copying body)
+// recordingPlugin records the Request it received from AuthZRequest, for
+// tests that need to inspect what the daemon actually sent a plugin.
+type recordingPlugin struct {
+	recordedRequest Request
+}
 
+func (p *recordingPlugin) Name() string { return "recording-plugin" }
+
+func (p *recordingPlugin) AuthZRequest(authReq *Request) (*Response, error) {
+	p.recordedRequest = *authReq
+	p.recordedRequest.RequestBody = append([]byte(nil), authReq.RequestBody...)
+	return &Response{Allow: true}, nil
+}
+
+func (p *recordingPlugin) AuthZResponse(_ *Request) (*Response, error) {
+	return &Response{Allow: true}, nil
+}
+
+// TestAuthZRequestBodyWithinLimit reproduces the CVE-2026-34040 fix's good
+// path: a body at the size limit must be sent to the plugin in full, and the
+// daemon must still be able to read it afterwards.
+func TestAuthZRequestBodyWithinLimit(t *testing.T) {
+	payload := strings.Repeat("a", maxBodySize)
+	plugin := &recordingPlugin{}
+	ctx := NewCtx([]Plugin{plugin}, "user", "tls", http.MethodPost, "/containers/create")
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/containers/create", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+
+	if err := ctx.AuthZRequest(httptest.NewRecorder(), req); err != nil {
+		t.Fatalf("AuthZRequest failed: %v", err)
 	}
 
-	for _, test := range tests {
-		msg := strings.Repeat("a", test.length)
-		body, closer, err := drainBody(io.NopCloser(bytes.NewReader([]byte(msg))))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(body) != test.expectedBodyLength {
-			t.Fatalf("Body must be copied, actual length: '%d'", len(body))
-		}
-		if closer == nil {
-			t.Fatal("Closer must not be nil")
-		}
-		modified, err := io.ReadAll(closer)
-		if err != nil {
-			t.Fatalf("Error must not be nil: '%v'", err)
-		}
-		if len(modified) != len(msg) {
-			t.Fatalf("Result should not be truncated. Original length: '%d', new length: '%d'", len(msg), len(modified))
-		}
+	if string(plugin.recordedRequest.RequestBody) != payload {
+		t.Fatalf("expected full request body to be sent to plugin, got length %d, expected %d", len(plugin.recordedRequest.RequestBody), len(payload))
+	}
+
+	remaining, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("failed to read request body after authz: %v", err)
+	}
+	if string(remaining) != payload {
+		t.Fatal("request body should be preserved for downstream readers")
+	}
+}
+
+// TestAuthZRequestBodyOverLimit reproduces CVE-2026-34040 itself: a body over
+// the size limit must now be rejected outright, not silently sent to the
+// plugin as empty while the daemon still processes the full original body.
+func TestAuthZRequestBodyOverLimit(t *testing.T) {
+	payload := strings.Repeat("a", maxBodySize+1)
+	plugin := &recordingPlugin{}
+	ctx := NewCtx([]Plugin{plugin}, "user", "tls", http.MethodPost, "/containers/create")
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/containers/create", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+
+	err := ctx.AuthZRequest(httptest.NewRecorder(), req)
+	if err == nil {
+		t.Fatal("expected AuthZRequest to reject body over max size")
+	}
+	if !strings.Contains(err.Error(), "request body too large for authorization plugin") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	remaining, readErr := io.ReadAll(req.Body)
+	if readErr != nil {
+		t.Fatalf("failed to read request body after authz error: %v", readErr)
+	}
+	if string(remaining) != payload {
+		t.Fatal("request body should still be preserved after over-limit check")
 	}
 }
 

@@ -10,6 +10,8 @@ func Validate(op *pb.Op) error {
 		return errors.Errorf("invalid nil op")
 	}
 
+	inputCount := len(op.Inputs)
+
 	switch op := op.Op.(type) {
 	case *pb.Op_Source:
 		if op.Source == nil {
@@ -53,6 +55,9 @@ func Validate(op *pb.Op) error {
 	case *pb.Op_Merge:
 		if op.Merge == nil {
 			return errors.Errorf("invalid nil merge op")
+		}
+		if len(op.Merge.Inputs) != inputCount {
+			return errors.Errorf("invalid merge op with %d inner inputs and %d outer inputs", len(op.Merge.Inputs), inputCount)
 		}
 	case *pb.Op_Diff:
 		if op.Diff == nil {

@@ -690,6 +690,7 @@ github.com/moby/buildkit/util/leaseutil
 github.com/moby/buildkit/util/network
 github.com/moby/buildkit/util/network/cniprovider
 github.com/moby/buildkit/util/network/netproviders
+github.com/moby/buildkit/util/openfile
 github.com/moby/buildkit/util/overlay
 github.com/moby/buildkit/util/progress
 github.com/moby/buildkit/util/progress/controller

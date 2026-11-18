@@ -14,6 +14,7 @@ import (
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/snapshot"
 	"github.com/moby/buildkit/solver/result"
+	"github.com/moby/buildkit/util/openfile"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 )
@@ -132,7 +133,7 @@ func unbundle(ctx context.Context, root string, bundle exporter.Attestation) ([]
 		if err != nil {
 			return nil, err
 		}
-		f, err := os.Open(p)
+		f, err := openfile.Regular(p)
 		if err != nil {
 			return nil, err
 		}

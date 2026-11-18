@@ -261,6 +261,9 @@ func processOwner(chopt *pb.ChownOpt, selectors map[int][]opsutils.Selector) err
 	}
 	if chopt.User != nil {
 		if u, ok := chopt.User.User.(*pb.UserOpt_ByName); ok {
+			if u.ByName == nil {
+				return errors.New("invalid nil named user")
+			}
 			if u.ByName.Input < 0 {
 				return errors.Errorf("invalid user index %d", u.ByName.Input)
 			}
@@ -269,6 +272,9 @@ func processOwner(chopt *pb.ChownOpt, selectors map[int][]opsutils.Selector) err
 	}
 	if chopt.Group != nil {
 		if u, ok := chopt.Group.User.(*pb.UserOpt_ByName); ok {
+			if u.ByName == nil {
+				return errors.New("invalid nil named user")
+			}
 			if u.ByName.Input < 0 {
 				return errors.Errorf("invalid user index %d", u.ByName.Input)
 			}
@@ -504,7 +510,10 @@ func (s *FileOpSolver) getInput(ctx context.Context, idx int, inputs []fileoptyp
 			switch u := uopt.User.(type) {
 			case *pb.UserOpt_ByName:
 				var m fileoptypes.Mount
-				if u.ByName.Input < 0 {
+				if u.ByName == nil {
+					return nil, errors.New("invalid nil named user")
+				}
+				if u.ByName.Input < 0 || int(u.ByName.Input) >= len(inputs)+len(actions) {
 					return nil, errors.Errorf("invalid user index: %d", u.ByName.Input)
 				}
 				inp, err := s.getInput(ctx, int(u.ByName.Input), inputs, actions, g)

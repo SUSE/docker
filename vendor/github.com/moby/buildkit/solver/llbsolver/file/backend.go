@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/containerd/continuity/fs"
@@ -99,9 +100,14 @@ func mkdir(ctx context.Context, d string, action pb.FileActionMkDir, user *copy.
 }
 
 func mkfile(ctx context.Context, d string, action pb.FileActionMkFile, user *copy.User, idmap *idtools.IdentityMapping) error {
-	p, err := fs.RootPath(d, filepath.Join("/", action.Path))
+	target := filepath.Join("/", action.Path)
+	p, err := fs.RootPath(d, target)
 	if err != nil {
 		return err
+	}
+	if p == d {
+		// the root has no parent inside the mount to stage a file in
+		return &os.PathError{Op: "mkfile", Path: target, Err: syscall.EISDIR}
 	}
 
 	ch, err := mapUserToChowner(user, idmap)
@@ -109,19 +115,53 @@ func mkfile(ctx context.Context, d string, action pb.FileActionMkFile, user *cop
 		return err
 	}
 
-	if err := os.WriteFile(p, action.Data, os.FileMode(action.Mode)&0777); err != nil {
+	return replaceWithFile(p, action.Data, os.FileMode(action.Mode)&0777, ch, timestampToTime(action.Timestamp))
+}
+
+// replaceWithFile writes dt to a new file next to p and renames it into place.
+// p is never opened, so a non-regular inode left there by an earlier action
+// (e.g. a device node mknod'd by an ExecOp, which the default capability set
+// and runc both allow) is replaced instead of written through. Opening a
+// device node would resolve its rdev against the host device table and write
+// outside the snapshot - unintended host device access on rootful workers.
+func replaceWithFile(p string, dt []byte, mode os.FileMode, ch copy.Chowner, tm *time.Time) (err error) {
+	var tmp string
+	defer func() {
+		if err != nil && tmp != "" {
+			os.Remove(tmp)
+		}
+	}()
+
+	f, err := os.CreateTemp(filepath.Dir(p), ".tmp-mkfile")
+	if err != nil {
+		return err
+	}
+	tmp = f.Name()
+
+	if _, err := f.Write(dt); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 
-	if err := copy.Chown(p, nil, ch); err != nil {
+	// CreateTemp always uses 0600, so the requested mode is applied separately.
+	if err := os.Chmod(tmp, mode); err != nil {
 		return err
 	}
 
-	if err := copy.Utimes(p, timestampToTime(action.Timestamp)); err != nil {
+	if err := copy.Chown(tmp, nil, ch); err != nil {
 		return err
 	}
 
-	return nil
+	if tm != nil {
+		if err := os.Chtimes(tmp, *tm, *tm); err != nil {
+			return err
+		}
+	}
+
+	return os.Rename(tmp, p)
 }
 
 func rm(ctx context.Context, d string, action pb.FileActionRm) error {
